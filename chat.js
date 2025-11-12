@@ -1,4 +1,4 @@
-// api/chat.js
+// chat.js
 
 const fs = require('fs');
 const path = require('path');
@@ -25,7 +25,9 @@ let chatData = {
   slowModeEnabled: false,
   slowModeInterval: 2000,
   tempDisableState: false,
-  lastMessageTimestamps: {}
+  lastMessageTimestamps: {},
+  profanityFilterEnabled: false,
+  kickingEnabled: true
 };
 
 // Load data from file
@@ -505,6 +507,212 @@ function handleAdminCommand(message, user, userId) {
     chatData.pinnedMessage = '';
     saveChatData();
     return { success: true, pinnedMessage: '' };
+  }
+
+  // Help command
+  if (trimmed === 'server init help') {
+    const isEli = user.originalName === 'Eli';
+    const helpText = isEli ? `
+🛠️ Admin Commands:
+1. server init temp disable
+2. server init temp disable off
+3. server init clear history
+4. server init kick <username>
+5. server init unkick <username>
+6. server init slowmode on/off
+7. server init slowmode <time>
+8. server init broadcast <text>
+9. server init admin delete <username>
+10. server init change password <new_password>
+11. server init pin <message>
+12. server init pinoff
+13. server init poll <option1> <option2>
+14. server init endpoll
+15. server init impersonate <username> <message>
+16. server init admin add <username>
+17. server init filter on/off
+18. server init kickon/kickoff` : `
+🛠️ Admin Commands:
+1. server init temp disable
+2. server init temp disable off
+3. server init clear history
+4. server init kick <username>
+5. server init unkick <username>
+6. server init slowmode on/off
+7. server init slowmode <time>
+8. server init broadcast <text>
+9. server init pin <message>
+10. server init pinoff
+11. server init poll <option1> <option2>
+12. server init endpoll
+13. server init admin add <username>`;
+    return { privateMessage: helpText };
+  }
+
+  // Unkick user
+  if (trimmed.startsWith('server init unkick ')) {
+    const targetName = trimmed.replace('server init unkick ', '').trim();
+    const targetUser = chatData.users.find(u =>
+      u.originalName.toLowerCase() === targetName.toLowerCase()
+    );
+    if (targetUser) {
+      const index = chatData.kickedUsers.indexOf(targetUser.userId);
+      if (index !== -1) {
+        chatData.kickedUsers.splice(index, 1);
+        const msg = broadcastSystemMessage(`✅ ${targetUser.originalName} has been un-kicked.`);
+        saveChatData();
+        return { success: true, broadcastMessage: msg };
+      }
+      return { privateMessage: `ℹ️ ${targetUser.originalName} is not currently kicked.` };
+    }
+    return { privateMessage: `❌ Could not find user "${targetName}".` };
+  }
+
+  // Admin delete (Eli only)
+  if (trimmed.startsWith('server init admin delete ')) {
+    if (user.originalName !== 'Eli') {
+      return { privateMessage: '❌ Only Eli is authorized to use this command.' };
+    }
+    const targetName = trimmed.replace('server init admin delete ', '').trim();
+    const targetUser = chatData.users.find(u =>
+      u.originalName.toLowerCase() === targetName.toLowerCase()
+    );
+    if (targetUser) {
+      targetUser.adminBlocked = true;
+      if (chatData.tempAdminState[targetUser.userId]) {
+        delete chatData.tempAdminState[targetUser.userId];
+      }
+      saveChatData();
+      return { privateMessage: `✅ ${targetUser.originalName} has been blocked from becoming admin.` };
+    }
+    return { privateMessage: `❌ Could not find user "${targetName}".` };
+  }
+
+  // Change password (Eli only)
+  if (trimmed.startsWith('server init change password ')) {
+    if (user.originalName !== 'Eli') {
+      return { privateMessage: '❌ Only Eli is authorized to change the password.' };
+    }
+    const newPassword = trimmed.replace('server init change password ', '').trim();
+    if (!newPassword) {
+      return { privateMessage: '❌ New password cannot be empty.' };
+    }
+    const encodedPassword = Buffer.from(newPassword).toString('base64');
+    const passwordFilePath = path.join(__dirname, 'eli-password.txt');
+    fs.writeFileSync(passwordFilePath, encodedPassword, 'utf8');
+    return { privateMessage: '✅ Eli login password has been updated.' };
+  }
+
+  // Impersonate (Eli only)
+  if (trimmed.startsWith('server init impersonate ')) {
+    if (user.originalName !== 'Eli') {
+      return { privateMessage: '❌ Only Eli is authorized to use the impersonate command.' };
+    }
+    const commandParts = trimmed.split(' ');
+    if (commandParts.length < 4) {
+      return { privateMessage: '❌ Invalid impersonate command format. Use: server init impersonate [username] [message]' };
+    }
+    const targetName = commandParts[3];
+    const messageIndex = trimmed.indexOf(targetName) + targetName.length;
+    const impersonatedMessage = trimmed.slice(messageIndex).trim();
+    const targetUser = chatData.users.find(u =>
+      u.originalName.toLowerCase() === targetName.toLowerCase()
+    );
+    if (!targetUser) {
+      return { privateMessage: `❌ Could not find user "${targetName}".` };
+    }
+    const msg = {
+      user: targetUser.displayName || targetUser.originalName,
+      text: impersonatedMessage,
+      color: targetUser.color,
+      avatar: targetUser.avatar,
+      time: getCurrentTime(),
+      id: Date.now() + '_' + Math.random(),
+      timestamp: Date.now()
+    };
+    chatData.messages.push(msg);
+    saveChatData();
+    return { success: true, broadcastMessage: msg };
+  }
+
+  // Admin add
+  if (trimmed.startsWith('server init admin add ')) {
+    const targetName = trimmed.replace('server init admin add ', '').trim();
+    const targetUser = chatData.users.find(u =>
+      u.originalName.toLowerCase() === targetName.toLowerCase()
+    );
+    if (!targetUser) {
+      return { privateMessage: `❌ Could not find user "${targetName}".` };
+    }
+    chatData.tempAdminState[targetUser.userId] = {
+      firstInitTime: Date.now(),
+      tempAdminGranted: true
+    };
+    saveChatData();
+    return {
+      success: true,
+      privateMessage: `✅ Temp admin granted to ${targetUser.originalName}.`,
+      notifyUser: { userId: targetUser.userId, message: '🛡️ You have been granted temporary admin.' }
+    };
+  }
+
+  // Profanity filter (Eli only)
+  if (trimmed === 'server init filter on') {
+    if (user.originalName !== 'Eli') {
+      return { privateMessage: '❌ Only Eli can enable the profanity filter.' };
+    }
+    chatData.profanityFilterEnabled = true;
+    const msg = broadcastSystemMessage('🛡️ Profanity filter has been ENABLED.');
+    saveChatData();
+    return { success: true, broadcastMessage: msg };
+  }
+
+  if (trimmed === 'server init filter off') {
+    if (user.originalName !== 'Eli') {
+      return { privateMessage: '❌ Only Eli can disable the profanity filter.' };
+    }
+    chatData.profanityFilterEnabled = false;
+    const msg = broadcastSystemMessage('🛡️ Profanity filter has been DISABLED.');
+    saveChatData();
+    return { success: true, broadcastMessage: msg };
+  }
+
+  // Kick toggle (Eli only)
+  if (trimmed === 'server init kickoff') {
+    if (user.originalName !== 'Eli') {
+      return { privateMessage: '❌ Only Eli can disable kicking.' };
+    }
+    chatData.kickingEnabled = false;
+    const msg = broadcastSystemMessage('🚫 Kick command has been DISABLED by Eli.');
+    saveChatData();
+    return { success: true, broadcastMessage: msg };
+  }
+
+  if (trimmed === 'server init kickon') {
+    if (user.originalName !== 'Eli') {
+      return { privateMessage: '❌ Only Eli can enable kicking.' };
+    }
+    chatData.kickingEnabled = true;
+    const msg = broadcastSystemMessage('✅ Kick command has been ENABLED by Eli.');
+    saveChatData();
+    return { success: true, broadcastMessage: msg };
+  }
+
+  // Temp disable
+  if (trimmed === 'server init temp disable') {
+    chatData.tempDisableState = true;
+    const msg = broadcastSystemMessage('⚠️ Admin has enabled temp chat disable.');
+    saveChatData();
+    chatData.lastStateChange = Date.now();
+    return { success: true, broadcastMessage: msg, tempDisable: true };
+  }
+
+  if (trimmed === 'server init temp disable off') {
+    chatData.tempDisableState = false;
+    const msg = broadcastSystemMessage('✅ Admin has disabled temp chat disable.');
+    saveChatData();
+    chatData.lastStateChange = Date.now();
+    return { success: true, broadcastMessage: msg, tempDisable: false };
   }
 
   // Poll
